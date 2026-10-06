@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive, nosnippet">
+<meta name="referrer" content="no-referrer">
+<title></title>
+<style>
+  html, body { margin: 0; background: #fff; }
+  body { display: none; font-family: system-ui, -apple-system, sans-serif; }
+  body.ready { display: block; background: #e9e9ec; }
+  #pages { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 12px 0 88px; }
+  .page { position: relative; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.2); max-width: calc(100vw - 16px); }
+  .page canvas { display: block; width: 100%; height: auto; }
+  .page a { position: absolute; display: block; }
+  #download {
+    position: fixed; right: 16px; bottom: 16px; padding: 12px 18px; border-radius: 999px;
+    background: #1d1d1f; color: #fff; text-decoration: none; font-size: 15px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.3);
+  }
+</style>
+</head>
+<body>
+<div id="pages"></div>
+<a id="download" download="CV.pdf">Download PDF</a>
+<script type="module">
+  const PDFJS = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/";
+
+  function b64urlDecode(s) {
+    s = s.replace(/-/g, "+").replace(/_/g, "/");
+    return Uint8Array.from(atob(s + "=".repeat((4 - s.length % 4) % 4)), c => c.charCodeAt(0));
+  }
+
+  async function decrypt() {
+    const raw = b64urlDecode(location.hash.slice(1));
+    if (raw.length !== 32) throw new Error("bad key");
+    const key = await crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["decrypt"]);
+    const res = await fetch("cv.enc", { cache: "no-cache" });
+    if (!res.ok) throw new Error("fetch failed");
+    const blob = new Uint8Array(await res.arrayBuffer());
+    const iv = blob.subarray(0, 12);
+    return new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, blob.subarray(12)));
+  }
+
+  async function render(pdfBytes) {
+    const pdfjs = await import(PDFJS + "pdf.min.mjs");
+    pdfjs.GlobalWorkerOptions.workerSrc = PDFJS + "pdf.worker.min.mjs";
+    // PDF.js transfers the buffer to its worker, so give it a copy.
+    const doc = await pdfjs.getDocument({ data: pdfBytes.slice() }).promise;
+    const container = document.getElementById("pages");
+    const cssWidth = Math.min(window.innerWidth - 16, 900);
+
+    for (let i = 1; i <= doc.numPages; i++) {
+      const page = await doc.getPage(i);
+      const base = page.getViewport({ scale: 1 });
+      const viewport = page.getViewport({ scale: cssWidth / base.width });
+      const dpr = window.devicePixelRatio || 1;
+
+      const wrap = document.createElement("div");
+      wrap.className = "page";
+      wrap.style.width = viewport.width + "px";
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.floor(viewport.width * dpr);
+      canvas.height = Math.floor(viewport.height * dpr);
+      wrap.appendChild(canvas);
+      container.appendChild(wrap);
+
+      await page.render({
+        canvasContext: canvas.getContext("2d"),
+        viewport,
+        transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
+      }).promise;
+
+      // Keep links in the CV (email, LinkedIn, ...) clickable.
+      for (const a of await page.getAnnotations()) {
+        if (a.subtype !== "Link" || !a.url) continue;
+        const [x1, y1, x2, y2] = viewport.convertToViewportRectangle(a.rect);
+        const link = document.createElement("a");
+        link.href = a.url;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        Object.assign(link.style, {
+          left: Math.min(x1, x2) / viewport.width * 100 + "%",
+          top: Math.min(y1, y2) / viewport.height * 100 + "%",
+          width: Math.abs(x2 - x1) / viewport.width * 100 + "%",
+          height: Math.abs(y2 - y1) / viewport.height * 100 + "%",
+        });
+        wrap.appendChild(link);
+      }
+    }
+  }
+
+  (async () => {
+    if (!location.hash) return;
+    let pdfBytes;
+    try { pdfBytes = await decrypt(); } catch { return; } // wrong/missing key: stay blank
+    document.title = "CV";
+    document.getElementById("download").href =
+      URL.createObjectURL(new Blob([pdfBytes], { type: "application/pdf" }));
+    document.body.classList.add("ready");
+    await render(pdfBytes);
+  })();
+</script>
+</body>
+</html>
